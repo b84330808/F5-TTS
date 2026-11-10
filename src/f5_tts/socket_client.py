@@ -24,19 +24,32 @@ async def listen_to_F5TTS(text, server_ip="localhost", server_port=9998):
         stream = p.open(format=pyaudio.paFloat32, channels=1, rate=24000, output=True, frames_per_buffer=2048)
 
         try:
+            # recv() returns whatever has arrived: a read can stop in the middle of a float32 sample,
+            # or carry the trailing b"END" together with the last samples. Keep leftover bytes for the next read.
+            buffer = b""
             while True:
                 data = await asyncio.get_event_loop().run_in_executor(None, client_socket.recv, 8192)
                 if not data:
                     break
-                if data == b"END":
+                buffer += data
+
+                # The audio is whole float32 samples, so b"END" can only start on a sample boundary.
+                end_of_audio = len(buffer) % 4 == 3 and buffer.endswith(b"END")
+                if end_of_audio:
+                    buffer = buffer[:-3]
+
+                n_bytes = len(buffer) - len(buffer) % 4
+                if n_bytes:
+                    audio_array = np.frombuffer(buffer[:n_bytes], dtype=np.float32)
+                    stream.write(audio_array.tobytes())
+                    buffer = buffer[n_bytes:]
+
+                    if first_chunk_time is None:
+                        first_chunk_time = time.time()
+
+                if end_of_audio:
                     logger.info("End of audio received.")
                     break
-
-                audio_array = np.frombuffer(data, dtype=np.float32)
-                stream.write(audio_array.tobytes())
-
-                if first_chunk_time is None:
-                    first_chunk_time = time.time()
 
         finally:
             stream.stop_stream()
